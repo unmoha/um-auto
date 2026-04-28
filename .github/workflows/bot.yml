@@ -1,0 +1,38 @@
+name: Telegram Football News Bot
+
+on:
+  schedule:
+    # Runs every 15 minutes
+    - cron: '*/15 * * * *'
+  workflow_dispatch: # Allows manual triggering
+
+jobs:
+  run_bot:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v3
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9' # Or your preferred Python version
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+
+    - name: Create .env file
+      run: |
+        echo "API_ID=${{ secrets.API_ID }}" >> .env
+        echo "API_HASH=${{ secrets.API_HASH }}" >> .env
+        echo "BOT_TOKEN=${{ secrets.BOT_TOKEN }}" >> .env
+        echo "CHANNEL_USERNAME=${{ secrets.CHANNEL_USERNAME }}" >> .env
+        echo "SESSION_NAME=${{ secrets.SESSION_NAME }}" >> .env
+        echo "TELEGRAM_PHONE=${{ secrets.TELEGRAM_PHONE }}" >> .env
+        echo "TELEGRAM_PASSWORD=${{ secrets.TELEGRAM_PASSWORD }}" >> .env
+      
+    - name: Run bot
+      run: python main.py
