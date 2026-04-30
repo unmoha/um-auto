@@ -9,6 +9,7 @@ from fetcher import NewsFetcher
 from translator import Translator
 from formatter import Formatter
 from storage import Storage
+from services.rss_parser import fetch_news
 
 load_dotenv()
 
@@ -79,6 +80,17 @@ async def run_bot():
             print(f"DIAGNOSTIC ERROR: An unexpected error occurred while sending test message: {e}")
             return
         # --- END DIAGNOSTIC ---
+
+        # --- NEW RSS AGGREGATION FEATURE ---
+        print("Fetching fresh football news from multi-source RSS...")
+        rss_news_items = fetch_news()
+        print(f"Successfully aggregated {len(rss_news_items)} unique news items.")
+        
+        print("\n--- [TEST] Latest 5 Unique Headlines ---")
+        for idx, news in enumerate(rss_news_items[:5]):
+            print(f"[{idx+1}] {news['title']} - {news['published']}")
+        print("-----------------------------------------\n")
+        # --- END NEW FEATURE ---
 
         # 1. Fetch
         all_news = await fetcher.fetch_all_news()

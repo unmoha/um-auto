@@ -33,10 +33,6 @@ jobs:
         echo "SESSION_NAME=${{ secrets.SESSION_NAME }}" >> .env
         echo "TELEGRAM_PHONE=${{ secrets.TELEGRAM_PHONE }}" >> .env
         echo "TELEGRAM_PASSWORD=${{ secrets.TELEGRAM_PASSWORD }}" >> .env
-        echo "NEWSAPI_KEY=${{ secrets.NEWSAPI_KEY }}" >> .env
-        echo "PEXELS_API_KEY=${{ secrets.PEXELS_API_KEY }}" >> .env
-        echo "UNSPLASH_API_KEY=${{ secrets.UNSPLASH_API_KEY }}" >> .env
-        echo "RAPIDAPI_KEY=${{ secrets.RAPIDAPI_KEY }}" >> .env
       
     - name: Run bot
       run: python main.py
