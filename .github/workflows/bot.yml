@@ -36,3 +36,5 @@ jobs:
       
     - name: Run bot
       run: python main.py
+      env:
+        PYTHONPATH: .
