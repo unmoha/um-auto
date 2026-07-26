@@ -3,16 +3,17 @@ import os
 from dotenv import load_dotenv
 from telethon import TelegramClient
 import requests
-from telethon.errors import ChannelInvalidError, ChannelPrivateError, PeerIdInvalidError, UserNotParticipantError, ChatWriteForbiddenError, MessageTooLongError, PhotoInvalidError, AuthKeyUnregisteredError, SessionPasswordNeededError, FloodWaitError
+from telethon.errors import ChannelInvalidError, ChannelPrivateError, PeerIdInvalidError, UserNotParticipantError, ChatWriteForbiddenError, MessageTooLongError, PhotoInvalidError, AuthKeyUnregisteredError, FloodWaitError, SessionPasswordNeededError
 
 from fetcher import NewsFetcher
 from translator import Translator
 from formatter import Formatter
 from storage import Storage
+from image_service import ImageService
 
 load_dotenv()
 
-API_ID = int(os.getenv('API_ID')) # Ensure API_ID is an integer
+API_ID = int(os.getenv('API_ID'))
 API_HASH = os.getenv('API_HASH')
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 CHANNEL_USERNAME = os.getenv('CHANNEL_USERNAME')
@@ -20,40 +21,55 @@ SESSION_NAME = os.getenv('SESSION_NAME', 'football_news_bot')
 TELEGRAM_PHONE = os.getenv('TELEGRAM_PHONE')
 TELEGRAM_PASSWORD = os.getenv('TELEGRAM_PASSWORD')
 
+# Global client instance to reuse across all posts
+_client_instance = None
+
+async def get_client():
+    """Get or create a persistent Telegram client instance."""
+    global _client_instance
+    if _client_instance is None:
+        _client_instance = TelegramClient(SESSION_NAME, API_ID, API_HASH)
+    return _client_instance
+
+async def authorize_client(client):
+    """Authorize the client once and reuse the session."""
+    if not await client.is_user_authorized():
+        print("Client not authorized. Attempting authorization...")
+        if BOT_TOKEN:
+            print("Attempting to authorize with BOT_TOKEN.")
+            await client.start(bot_token=BOT_TOKEN)
+        elif TELEGRAM_PHONE:
+            print(f"Attempting to authorize with TELEGRAM_PHONE: {TELEGRAM_PHONE}")
+            try:
+                await client.start(phone=TELEGRAM_PHONE, password=TELEGRAM_PASSWORD)
+            except SessionPasswordNeededError:
+                print("Two-factor authentication is enabled.")
+                raise
+        else:
+            raise ValueError("No bot token or phone number provided for authorization.")
+        print("Client authorized successfully!")
+    else:
+        print("Client is already authorized (using existing session).")
+
 async def run_bot():
     print("Initializing bot...")
 
-    # Initialize Telegram client
-    client = TelegramClient(SESSION_NAME, API_ID, API_HASH)
+    # Get persistent client
+    client = await get_client()
 
     # Initialize components with the shared client
     fetcher = NewsFetcher(client)
     translator = Translator()
     formatter = Formatter()
     storage = Storage()
+    image_service = ImageService()
 
     try:
         print("Connecting Telegram client...")
         await client.connect()
 
-        if not await client.is_user_authorized():
-            print("Client not authorized. Attempting authorization...")
-            if BOT_TOKEN:
-                print("Attempting to authorize with BOT_TOKEN.")
-                await client.start(bot_token=BOT_TOKEN)
-            elif TELEGRAM_PHONE:
-                print(f"Attempting to authorize with TELEGRAM_PHONE: {TELEGRAM_PHONE}")
-                try:
-                    await client.start(phone=TELEGRAM_PHONE, password=TELEGRAM_PASSWORD)
-                except SessionPasswordNeededError:
-                    print("Two-factor authentication is enabled. Please run the script locally once to enter the password.")
-                    return
-                except Exception as e:
-                    print(f"Error during user authorization: {e}")
-                    return
-            else:
-                print("Error: No bot token or phone number provided for authorization. Cannot proceed.")
-                return
+        # Authorize only once per session
+        await authorize_client(client)
 
         print("Telegram client connected and authorized.")
         print(f"Target CHANNEL_USERNAME: {CHANNEL_USERNAME}")
@@ -63,20 +79,13 @@ async def run_bot():
             await client.send_message(CHANNEL_USERNAME, "Bot started successfully and is attempting to post news!")
             print("DIAGNOSTIC: Sent test message to channel.")
         except (ChannelInvalidError, ChannelPrivateError, PeerIdInvalidError, UserNotParticipantError, ChatWriteForbiddenError, AuthKeyUnregisteredError) as e:
-            print(f"DIAGNOSTIC ERROR: Failed to send test message to channel '{CHANNEL_USERNAME}'. Please check channel username and bot/user permissions. Error: {e}")
-            print("Exiting as channel access seems problematic.")
+            print(f"DIAGNOSTIC ERROR: Failed to send test message to channel '{CHANNEL_USERNAME}'. Error: {e}")
             return
         except FloodWaitError as e:
-            print(f"DIAGNOSTIC ERROR: FloodWaitError while sending test message. Waiting for {e.seconds} seconds.")
+            print(f"DIAGNOSTIC ERROR: FloodWaitError. Waiting for {e.seconds} seconds.")
             await asyncio.sleep(e.seconds)
-            try:
-                await client.send_message(CHANNEL_USERNAME, "Bot started successfully and is attempting to post news! (Retry after FloodWait)")
-                print("DIAGNOSTIC: Sent test message to channel after FloodWait.")
-            except Exception as retry_e:
-                print(f"DIAGNOSTIC ERROR: Failed to send test message after FloodWait: {retry_e}")
-                return
         except Exception as e:
-            print(f"DIAGNOSTIC ERROR: An unexpected error occurred while sending test message: {e}")
+            print(f"DIAGNOSTIC ERROR: An unexpected error occurred: {e}")
             return
         # --- END DIAGNOSTIC ---
 
@@ -89,10 +98,9 @@ async def run_bot():
 
         for news_item in all_news:
             if storage.is_posted(news_item['id']):
-                # print(f"Skipping duplicate: {news_item['headline']}")
                 continue
 
-            if new_posts_count >= 5: # Limit per run
+            if new_posts_count >= 5:
                 print("Reached post limit for this run. Skipping remaining news items.")
                 break
 
@@ -103,85 +111,89 @@ async def run_bot():
                 cleaned = formatter.clean_text(news_item['content'])
                 amharic_text = translator.translate_to_amharic(cleaned)
 
-                # Apply viral rewrite (optional)
-                final_content = formatter.viral_rewrite(amharic_text) # Apply to translated text
+                # Apply viral rewrite
+                final_content = formatter.viral_rewrite(amharic_text)
 
                 # Format
                 message_text = formatter.format_news_message(
                     news_item['headline'], final_content, news_item['source']
                 )
 
-                # Send
-                if news_item['image_url'] == "TELETHON_PHOTO_PLACEHOLDER" and 'telegram_message' in news_item:
-                    original_message = news_item['telegram_message']
-                    if original_message.photo:
-                        try:
-                            # Download as bytes for send_file
-                            photo_bytes = await original_message.download_media(file=bytes)
-                            await client.send_file(CHANNEL_USERNAME, photo_bytes, caption=message_text)
-                            print(f"Posted with image from Telegram: {news_item['headline']}")
-                        except (PhotoInvalidError, MessageTooLongError) as e:
-                            print(f"Error sending Telegram image for '{news_item['headline']}': {e}. Posting text only.")
-                            await client.send_message(CHANNEL_USERNAME, message_text)
-                        except Exception as e:
-                            print(f"Unexpected error sending Telegram image for '{news_item['headline']}': {e}. Posting text only.")
-                            await client.send_message(CHANNEL_USERNAME, message_text)
+                # Get image (prioritize external URLs, then Telegram photos, then generate placeholder)
+                image_data = None
+                image_source = None
+
+                if news_item.get('image_url') and news_item['image_url'] != "TELETHON_PHOTO_PLACEHOLDER":
+                    # Try to download external image
+                    try:
+                        image_data = image_service.download_image(news_item['image_url'])
+                        image_source = "external"
+                        print(f"Using image from external source: {news_item['image_url']}")
+                    except Exception as e:
+                        print(f"Failed to download external image: {e}")
+                        image_data = None
+
+                if not image_data and 'telegram_message' in news_item and news_item['telegram_message'].photo:
+                    # Try to use Telegram photo
+                    try:
+                        image_data = await image_service.download_telegram_photo(news_item['telegram_message'])
+                        image_source = "telegram"
+                        print(f"Using image from Telegram message")
+                    except Exception as e:
+                        print(f"Failed to download Telegram image: {e}")
+                        image_data = None
+
+                if not image_data:
+                    # Generate a placeholder image with the headline
+                    try:
+                        image_data = image_service.generate_placeholder_image(news_item['headline'], news_item['source'])
+                        image_source = "generated"
+                        print(f"Generated placeholder image for: {news_item['headline']}")
+                    except Exception as e:
+                        print(f"Failed to generate placeholder image: {e}")
+
+                # Send the post
+                try:
+                    if image_data:
+                        await client.send_file(CHANNEL_USERNAME, image_data, caption=message_text)
+                        print(f"Posted with image ({image_source}): {news_item['headline']}")
                     else:
                         await client.send_message(CHANNEL_USERNAME, message_text)
-                        print(f"Posted text only (no photo in original Telegram message): {news_item['headline']}")
-                elif news_item['image_url']:
-                    try:
-                        response = requests.get(news_item['image_url'], timeout=10)
-                        if response.status_code == 200:
-                            # Send image bytes directly
-                            await client.send_file(CHANNEL_USERNAME, response.content, caption=message_text)
-                            print(f"Posted with image from RSS: {news_item['headline']}")
-                        else:
-                            print(f"Could not download image from {news_item['image_url']} (status {response.status_code}). Posting text only.")
-                            await client.send_message(CHANNEL_USERNAME, message_text)
-                    except (requests.exceptions.RequestException, PhotoInvalidError, MessageTooLongError) as e:
-                        print(f"Error downloading or sending RSS image {news_item['image_url']} for '{news_item['headline']}': {e}. Posting text only.")
-                        await client.send_message(CHANNEL_USERNAME, message_text)
-                    except Exception as e:
-                        print(f"Unexpected error with RSS image for '{news_item['headline']}': {e}. Posting text only.")
-                        await client.send_message(CHANNEL_USERNAME, message_text)
-                else:
-                    await client.send_message(CHANNEL_USERNAME, message_text)
-                    print(f"Posted text only: {news_item['headline']}")
+                        print(f"Posted text only (no image available): {news_item['headline']}")
+                except MessageTooLongError:
+                    print(f"Message too long. Truncating...")
+                    if image_data:
+                        await client.send_file(CHANNEL_USERNAME, image_data, caption=message_text[:1024])
+                    else:
+                        await client.send_message(CHANNEL_USERNAME, message_text[:4096])
+                    storage.add_posted(news_item['id'])
+                    new_posts_count += 1
+                    await asyncio.sleep(5)
+                    continue
 
                 storage.add_posted(news_item['id'])
                 new_posts_count += 1
-                print(f"Successfully posted news from {news_item['source']}. Total new posts: {new_posts_count}")
-                await asyncio.sleep(5) # Delay to avoid flood limits
+                print(f"Successfully posted from {news_item['source']}. Total: {new_posts_count}")
+                await asyncio.sleep(5)
 
             except (ChannelInvalidError, ChannelPrivateError, PeerIdInvalidError, UserNotParticipantError, ChatWriteForbiddenError, AuthKeyUnregisteredError) as e:
-                print(f"TELEGRAM POSTING ERROR for '{news_item['headline']}': Channel access issue. Error: {e}")
-                print("Please ensure the bot/user has correct permissions and the channel username is correct.")
-                # This is a critical error for the channel, might as well stop trying to post to it
+                print(f"TELEGRAM POSTING ERROR: Channel access issue. Error: {e}")
                 break
-            except MessageTooLongError as e:
-                print(f"TELEGRAM POSTING ERROR for '{news_item['headline']}': Message too long. Error: {e}")
-                # Try to send without image or truncate message if this happens often
-                await client.send_message(CHANNEL_USERNAME, message_text[:4000]) # Telegram message limit is 4096 characters
-                storage.add_posted(news_item['id']) # Mark as posted even if truncated
-                new_posts_count += 1
-                await asyncio.sleep(5)
             except FloodWaitError as e:
-                print(f"TELEGRAM POSTING ERROR for '{news_item['headline']}': FloodWaitError. Waiting for {e.seconds} seconds.")
-                await asyncio.sleep(e.seconds + 5) # Add a buffer
+                print(f"TELEGRAM POSTING ERROR: FloodWaitError. Waiting for {e.seconds} seconds.")
+                await asyncio.sleep(e.seconds + 5)
             except Exception as e:
-                print(f"An unexpected error occurred while processing or posting news item '{news_item['headline']}': {e}")
-                # Continue to next news item even if one fails
+                print(f"An unexpected error occurred while processing '{news_item['headline']}': {e}")
+                continue
 
     except Exception as e:
-        print(f"An unhandled error occurred during bot execution: {e}")
+        print(f"An unhandled error occurred: {e}")
     finally:
         print("Disconnecting Telegram client...")
         await client.disconnect()
         print("Bot finished.")
 
 if __name__ == '__main__':
-    # Ensure API_ID and API_HASH are set
     if not API_ID or not API_HASH:
         print("Error: API_ID and API_HASH must be set in the .env file.")
     elif not CHANNEL_USERNAME:
