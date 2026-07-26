@@ -1,139 +1,117 @@
 import requests
-from io import BytesIO
 from PIL import Image, ImageDraw, ImageFont
-import textwrap
+from io import BytesIO
 import os
+from datetime import datetime
 
 class ImageService:
-    """Handles all image operations: downloading, processing, and generating placeholders."""
+    def __init__(self, cache_dir='image_cache'):
+        self.cache_dir = cache_dir
+        if not os.path.exists(cache_dir):
+            os.makedirs(cache_dir)
     
-    def __init__(self):
-        self.timeout = 10
-        self.max_retries = 2
-        self.placeholder_width = 1200
-        self.placeholder_height = 630
-
-    def download_image(self, image_url, timeout=None):
-        """Download image from URL and return as bytes."""
-        if not image_url:
-            return None
-        
-        timeout = timeout or self.timeout
-        
-        for attempt in range(self.max_retries):
+    async def get_image(self, image_url, headline):
+        """
+        Get image from URL or generate one if not available.
+        Returns bytes or file path.
+        """
+        # Try to fetch image from URL
+        if image_url:
             try:
-                response = requests.get(image_url, timeout=timeout)
-                if response.status_code == 200:
-                    # Validate it's actually an image
-                    img = Image.open(BytesIO(response.content))
-                    img.verify()
-                    # Re-open since verify() closes the file
-                    img = Image.open(BytesIO(response.content))
-                    # Resize to reasonable dimensions if too large
-                    img.thumbnail((1280, 720), Image.Resampling.LANCZOS)
-                    # Convert to RGB if needed
-                    if img.mode in ('RGBA', 'P'):
-                        bg = Image.new('RGB', img.size, (255, 255, 255))
-                        bg.paste(img, mask=img.split()[-1] if img.mode == 'RGBA' else None)
-                        img = bg
-                    # Save to bytes
-                    output = BytesIO()
-                    img.save(output, format='JPEG', quality=85)
-                    output.seek(0)
-                    return output
-            except requests.exceptions.RequestException as e:
-                print(f"Attempt {attempt + 1}: Failed to download image: {e}")
-                continue
+                image_bytes = await self._download_image(image_url)
+                if image_bytes:
+                    return image_bytes
             except Exception as e:
-                print(f"Attempt {attempt + 1}: Error processing image: {e}")
-                continue
+                print(f"Failed to download image from {image_url}: {e}")
         
-        return None
-
-    async def download_telegram_photo(self, message):
-        """Download photo from a Telegram message and return as bytes."""
+        # Fallback: Generate professional placeholder with headline
+        return self._generate_placeholder_image(headline)
+    
+    async def _download_image(self, image_url, timeout=10):
+        """Download image from URL with timeout"""
         try:
-            if not message.photo:
-                return None
+            response = requests.get(image_url, timeout=timeout)
+            response.raise_for_status()
             
-            photo_bytes = await message.download_media(file=bytes)
+            # Validate it's actually an image
+            img = Image.open(BytesIO(response.content))
+            img.verify()  # Verify image integrity
             
-            # Validate and resize
-            img = Image.open(BytesIO(photo_bytes))
-            img.thumbnail((1280, 720), Image.Resampling.LANCZOS)
-            
-            if img.mode in ('RGBA', 'P'):
-                bg = Image.new('RGB', img.size, (255, 255, 255))
-                bg.paste(img, mask=img.split()[-1] if img.mode == 'RGBA' else None)
-                img = bg
-            
-            output = BytesIO()
-            img.save(output, format='JPEG', quality=85)
-            output.seek(0)
-            return output
+            # Re-open after verify
+            img = Image.open(BytesIO(response.content))
+            return response.content
         except Exception as e:
-            print(f"Error downloading Telegram photo: {e}")
+            print(f"Error downloading image: {e}")
             return None
-
-    def generate_placeholder_image(self, headline, source):
-        """Generate a professional placeholder image with headline and source."""
+    
+    def _generate_placeholder_image(self, headline):
+        """Generate professional placeholder image with headline"""
         try:
-            # Create image with gradient-like background
-            img = Image.new('RGB', (self.placeholder_width, self.placeholder_height), 
-                           color=(25, 50, 100))  # Dark blue background
+            # Create image with football/sports theme colors
+            width, height = 1200, 630
+            background_color = (15, 76, 129)  # Dark blue - BBC Sport color
+            text_color = (255, 255, 255)  # White
+            accent_color = (255, 153, 0)  # Orange accent
             
+            img = Image.new('RGB', (width, height), background_color)
             draw = ImageDraw.Draw(img)
             
-            # Try to use a nice font, fallback to default
+            # Try to use a system font, fallback to default
             try:
-                title_font = ImageFont.truetype("/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf", 54)
-                source_font = ImageFont.truetype("/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf", 40)
+                # Try multiple font paths for different systems
+                font_paths = [
+                    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+                    "/System/Library/Fonts/Arial.ttf",
+                    "C:\\Windows\\Fonts\\arial.ttf",
+                ]
+                font_size = 60
+                font = None
+                for path in font_paths:
+                    if os.path.exists(path):
+                        font = ImageFont.truetype(path, font_size)
+                        break
+                if font is None:
+                    font = ImageFont.load_default()
             except:
-                # Fallback to default font
-                title_font = ImageFont.load_default()
-                source_font = ImageFont.load_default()
+                font = ImageFont.load_default()
             
-            # Add decorative header
-            draw.rectangle([(0, 0), (self.placeholder_width, 150)], fill=(0, 100, 200))
+            # Add sports emoji
+            emoji_text = "⚽"
+            draw.text((50, 50), emoji_text, font=font, fill=accent_color)
             
-            # Add football emoji and title
-            text = "⚽ SPORTS NEWS"
-            bbox = draw.textbbox((0, 0), text, font=source_font)
-            text_width = bbox[2] - bbox[0]
-            x = (self.placeholder_width - text_width) // 2
-            draw.text((x, 50), text, fill=(255, 255, 255), font=source_font)
+            # Add headline with text wrapping
+            headline_short = headline[:60] + "..." if len(headline) > 60 else headline
+            lines = self._wrap_text(headline_short, 40)
             
-            # Add headline (wrapped)
-            margin = 60
-            max_width = self.placeholder_width - (2 * margin)
+            y_offset = 150
+            for line in lines:
+                draw.text((50, y_offset), line, font=font, fill=text_color)
+                y_offset += 80
             
-            # Wrap text
-            avg_char_width = 35
-            chars_per_line = max_width // avg_char_width
-            wrapped_lines = textwrap.wrap(headline, width=chars_per_line)
-            
-            # Draw headline
-            y_position = 220
-            for line in wrapped_lines[:3]:  # Limit to 3 lines
-                bbox = draw.textbbox((0, 0), line, font=title_font)
-                text_width = bbox[2] - bbox[0]
-                x = (self.placeholder_width - text_width) // 2
-                draw.text((x, y_position), line, fill=(255, 255, 255), font=title_font)
-                y_position += 80
-            
-            # Add source at bottom
-            source_text = f"Source: {source}"
-            bbox = draw.textbbox((0, 0), source_text, font=source_font)
-            text_width = bbox[2] - bbox[0]
-            x = (self.placeholder_width - text_width) // 2
-            draw.text((x, self.placeholder_height - 100), source_text, 
-                     fill=(200, 200, 200), font=source_font)
+            # Add footer
+            footer_font = ImageFont.load_default()
+            draw.text((50, height - 60), "Football News • BBC Sport", font=footer_font, fill=accent_color)
             
             # Save to bytes
-            output = BytesIO()
-            img.save(output, format='JPEG', quality=85)
-            output.seek(0)
-            return output
+            img_bytes = BytesIO()
+            img.save(img_bytes, format='JPEG', quality=85)
+            img_bytes.seek(0)
+            return img_bytes.getvalue()
         except Exception as e:
             print(f"Error generating placeholder image: {e}")
             return None
+    
+    def _wrap_text(self, text, char_per_line=40):
+        """Simple text wrapping"""
+        lines = []
+        current_line = ""
+        for word in text.split():
+            if len(current_line) + len(word) + 1 <= char_per_line:
+                current_line += word + " "
+            else:
+                if current_line:
+                    lines.append(current_line.strip())
+                current_line = word + " "
+        if current_line:
+            lines.append(current_line.strip())
+        return lines
